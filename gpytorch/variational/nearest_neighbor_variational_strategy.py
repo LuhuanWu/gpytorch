@@ -296,13 +296,13 @@ class NNVariationalStrategy(UnwhitenedVariationalStrategy):
         expanded_nearest_neighbor_indices = nearest_neighbor_indices.expand(*self._batch_shape, kl_bs, self.k)
         nearest_neighbor_variational_covar = expanded_variational_stddev.gather(-2, expanded_nearest_neighbor_indices)**2  # (*batch_shape, kl_bs, k)
         bjsquared_s = torch.sum(interp_term**2 * nearest_neighbor_variational_covar, dim=-1)  # (*batch_shape, kl_bs)
-        inducing_point_covar = variational_stddev[..., kl_indices]
+        inducing_point_covar = variational_stddev[..., kl_indices] ** 2
         trace_term = (1./F * (bjsquared_s + inducing_point_covar)).sum(dim=-1)
 
         # compute invquad_term
         nearest_neighbor_variational_mean = expanded_variational_mean.gather(-2, expanded_nearest_neighbor_indices) # (*batch_shape, kl_bs, k)
         Bj_m = torch.sum(interp_term * nearest_neighbor_variational_mean, dim=-1) # (*batch_shape, kl_bs)
-        inducing_point_variational_mean = variational_mean[..., kl_indices] ** 2
+        inducing_point_variational_mean = variational_mean[..., kl_indices]
         invquad_term = torch.sum((inducing_point_variational_mean - Bj_m)**2 / F, dim=-1)
 
         kl = 1./2 * (logdet_p - logdet_q - kl_bs + trace_term + invquad_term)
