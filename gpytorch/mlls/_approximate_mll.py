@@ -57,6 +57,9 @@ class _ApproximateMarginalLogLikelihood(MarginalLogLikelihood, ABC):
         num_batch = approximate_dist_f.event_shape[0]
         log_likelihood = self._log_likelihood_term(approximate_dist_f, target, **kwargs).div(num_batch)
         kl_divergence = self.model.variational_strategy.kl_divergence().div(self.num_data / self.beta)
+        print("log_likelihood", log_likelihood.detach())
+        print("kl_divergence", kl_divergence.detach())
+        #kl_divergence = 0 
 
         # Add any additional registered loss terms
         added_loss = torch.zeros_like(log_likelihood)
