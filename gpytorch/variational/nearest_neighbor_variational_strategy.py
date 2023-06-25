@@ -8,6 +8,7 @@ from linear_operator.operators import DiagLinearOperator, LinearOperator, Triang
 from linear_operator.utils.cholesky import psd_safe_cholesky
 from torch import LongTensor, Tensor
 
+from .. import settings 
 from ..distributions import MultivariateNormal
 from ..models import ApproximateGP
 from ..utils.errors import CachingError
@@ -87,8 +88,7 @@ class NNVariationalStrategy(UnwhitenedVariationalStrategy):
         super().__init__(
             model, inducing_points, variational_distribution, learn_inducing_locations=False, jitter_val=jitter_val
         )
-        # Make sure we don't try to initialize variational parameters - because of minibatching
-        self.variational_params_initialized.fill_(1)
+        #self.variational_params_initialized.fill_(1)
 
         # Model
         object.__setattr__(self, "model", model)
@@ -109,7 +109,9 @@ class NNVariationalStrategy(UnwhitenedVariationalStrategy):
         self.nn_util: NNUtil = NNUtil(
             k, dim=self.D, batch_shape=self._inducing_batch_shape, device=inducing_points.device
         )
-        self._compute_nn()
+        if self.k < self.M:
+            self._compute_nn()
+        # otherwise, no nearest neighbor approximation is used 
 
         self.training_batch_size = training_batch_size
         self._set_training_iterator()
@@ -141,6 +143,13 @@ class NNVariationalStrategy(UnwhitenedVariationalStrategy):
         # Delete previously cached items from the training distribution
         if self.training:
             self._clear_cache()
+            
+            # (Maybe) initialize variational distribution
+            if not self.variational_params_initialized.item():
+                prior_dist = self.prior_distribution
+                self._variational_distribution.initialize_variational_distribution(prior_dist)
+                self.variational_params_initialized.fill_(1)
+
             return self.forward(
                 x, self.inducing_points, inducing_values=None, variational_inducing_covar=None, **kwargs
             )
@@ -250,8 +259,11 @@ class NNVariationalStrategy(UnwhitenedVariationalStrategy):
 
     def _set_training_iterator(self) -> None:
         self._training_indices_iter = 0
-        training_indices = torch.randperm(self.M - self.k, device=self.inducing_points.device) + self.k
-        self._training_indices_iterator = (torch.arange(self.k),) + training_indices.split(self.training_batch_size)
+        if self. k < self.M:
+            training_indices = torch.randperm(self.M - self.k, device=self.inducing_points.device) + self.k
+            self._training_indices_iterator = (torch.arange(self.k),) + training_indices.split(self.training_batch_size)
+        else:
+            self._training_indices_iterator = (torch.arange(self.k),) 
         self._total_training_batches = len(self._training_indices_iterator)
 
     def _get_training_indices(self) -> LongTensor:
@@ -276,7 +288,8 @@ class NNVariationalStrategy(UnwhitenedVariationalStrategy):
         variational_inducing_covar = DiagLinearOperator(variational_covar_fisrtk)
 
         variational_distribution = MultivariateNormal(inducing_values, variational_inducing_covar)
-        kl = torch.distributions.kl.kl_divergence(variational_distribution, prior_dist)  # model_batch_shape
+        with settings.max_preconditioner_size(0):
+            kl = torch.distributions.kl.kl_divergence(variational_distribution, prior_dist)  # model_batch_shape
         return kl
 
     def _stochastic_kl_helper(self, kl_indices: Tensor) -> Tensor:
@@ -345,7 +358,6 @@ class NNVariationalStrategy(UnwhitenedVariationalStrategy):
 
         kl = (logdet_p - logdet_q - kl_bs + trace_term + invquad_term) * (1.0 / 2)
         assert kl.shape == self._batch_shape, kl.shape
-        kl = kl.mean()
 
         return kl
 
