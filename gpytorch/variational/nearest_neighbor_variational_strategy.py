@@ -111,8 +111,7 @@ class NNVariationalStrategy(UnwhitenedVariationalStrategy):
         self.nn_util: NNUtil = NNUtil(
             k, dim=self.D, batch_shape=self._inducing_batch_shape, device=inducing_points.device
         )
-        if self.k < self.M:
-            self._compute_nn()
+        self._compute_nn()
         # otherwise, no nearest neighbor approximation is used 
 
         self.training_batch_size = training_batch_size
@@ -401,6 +400,7 @@ class NNVariationalStrategy(UnwhitenedVariationalStrategy):
         with torch.no_grad():
             inducing_points_fl = self.inducing_points.data.float()
             self.nn_util.set_nn_idx(inducing_points_fl)
-            self.nn_xinduce_idx = self.nn_util.build_sequential_nn_idx(inducing_points_fl)
-            #  shape (*_inducing_batch_shape, M-k, k)
+            if self.k < self.M:
+                self.nn_xinduce_idx = self.nn_util.build_sequential_nn_idx(inducing_points_fl)
+                #  shape (*_inducing_batch_shape, M-k, k)
         return self
