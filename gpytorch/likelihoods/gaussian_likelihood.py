@@ -46,8 +46,6 @@ class _GaussianLikelihoodBase(Likelihood):
         # Potentially reshape the noise to deal with the multitask case
         noise = noise.view(*noise.shape[:-1], *input.event_shape)
 
-        mse = torch.mean((target-mean)**2, dim=-1)
-        print("mse", mse.detach())
         res = ((target - mean).square() + variance) / noise + noise.log() + math.log(2 * math.pi)
         res = res.mul(-0.5)
         if num_event_dim > 1:  # Do appropriate summation for multitask Gaussian likelihoods
