@@ -62,7 +62,8 @@ class NNVariationalStrategy(UnwhitenedVariationalStrategy):
         VariationalDistribution object that represents the form of the variational distribution :math:`q(\mathbf u)`
     :param k: Number of nearest neighbors.
     :param training_batch_size: The number of data points that will be in the training batch size.
-    :param jitter_val: Amount of diagonal jitter to add for Cholesky factorization numerical stability
+    :param jitter_val: Amount of diagonal jitter to add for covariance matrix numerical stability. 
+    :param compute_full_kl: Whether to compute full kl divergence or stochastic estimate.
 
     .. _Wu et al (2022):
         https://arxiv.org/pdf/2202.01694.pdf
@@ -79,7 +80,8 @@ class NNVariationalStrategy(UnwhitenedVariationalStrategy):
         variational_distribution: _VariationalDistribution,
         k: int,
         training_batch_size: int,
-        jitter_val: Optional[float] = None,
+        jitter_val: Optional[float] = 1e-3,
+        compute_full_kl: Optional[bool] = False 
     ):
         assert isinstance(
             variational_distribution, MeanFieldVariationalDistribution
@@ -116,6 +118,8 @@ class NNVariationalStrategy(UnwhitenedVariationalStrategy):
         self.training_batch_size = training_batch_size
         self._set_training_iterator()
 
+        self.compute_full_kl = compute_full_kl 
+
     @property
     @cached(name="prior_distribution_memo")
     def prior_distribution(self) -> MultivariateNormal:
@@ -147,7 +151,11 @@ class NNVariationalStrategy(UnwhitenedVariationalStrategy):
             # (Maybe) initialize variational distribution
             if not self.variational_params_initialized.item():
                 prior_dist = self.prior_distribution
-                self._variational_distribution.initialize_variational_distribution(prior_dist)
+                self._variational_distribution.variational_mean.data.copy_(prior_dist.mean)
+                self._variational_distribution.variational_mean.data.add_(
+                    torch.randn_like(prior_dist.mean), alpha=self._variational_distribution.mean_init_std)
+                # initialize with a small variational stddev for quicker conv. of kl divergence
+                self._variational_distribution._variational_stddev.data.copy_(1e-2)
                 self.variational_params_initialized.fill_(1)
 
             return self.forward(
@@ -362,15 +370,16 @@ class NNVariationalStrategy(UnwhitenedVariationalStrategy):
         return kl
 
     def _kl_divergence(
-        self, kl_indices: Optional[LongTensor] = None, compute_full: bool = False, batch_size: Optional[int] = None
+        self, kl_indices: Optional[LongTensor] = None, batch_size: Optional[int] = None
     ) -> Tensor:
-        if compute_full:
+        if self.compute_full_kl:
             if batch_size is None:
                 batch_size = self.training_batch_size
             kl = self._firstk_kl_helper()
             for kl_indices in torch.split(torch.arange(self.k, self.M), batch_size):
                 kl += self._stochastic_kl_helper(kl_indices)
         else:
+            # compute a stochastic estimate
             assert kl_indices is not None
             if (self._training_indices_iter == 1) or (self.M == self.k):
                 assert len(kl_indices) == self.k, (
