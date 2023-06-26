@@ -300,7 +300,7 @@ class NNVariationalStrategy(UnwhitenedVariationalStrategy):
         return kl
 
     def _stochastic_kl_helper(self, kl_indices: Tensor) -> Tensor:
-        # Compute the KL divergence for a mini batch of the rest M-1 inducing points
+        # Compute the KL divergence for a mini batch of the rest M-k inducing points
         # See paper appendix for kl breakdown
         kl_bs = len(kl_indices)  # training_batch_size
         variational_mean = self._variational_distribution.variational_mean # (*model_bs, M)
