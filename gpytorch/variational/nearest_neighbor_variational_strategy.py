@@ -306,11 +306,11 @@ class NNVariationalStrategy(UnwhitenedVariationalStrategy):
         variational_mean = self._variational_distribution.variational_mean # (*model_bs, M)
         variational_stddev = self._variational_distribution._variational_stddev
 
-        ### compute logdet_q
+        ### (1) compute logdet_q
         inducing_point_log_variational_covar = (variational_stddev[..., kl_indices] ** 2).log()
         logdet_q = torch.sum(inducing_point_log_variational_covar, dim=-1) # model_bs
 
-        ### compute lodet_p
+        ### (2) compute lodet_p
         # Select a mini-batch of inducing points according to kl_indices
         inducing_points = self.inducing_points[..., kl_indices, :] # (*inducing_bs, kl_bs, D)
         # Select their K nearest neighbors
@@ -324,44 +324,62 @@ class NNVariationalStrategy(UnwhitenedVariationalStrategy):
         )
         nearest_neighbors = expanded_inducing_points_all.gather(-3, expanded_nearest_neighbor_indices)
         # (*inducing_bs, kl_bs, K, D)
-
-        # move the kl_bs dimension to the first dimension to enable batch covar_module computation 
+        
+        # Compute prior distribution 
+        # Move the kl_bs dimension to the first dimension to enable batch covar_module computation 
         nearest_neighbors_ = nearest_neighbors.permute((-3,)+tuple(range(len(self._inducing_batch_shape)))+(-2,-1)) 
         # (kl_bs, *inducing_bs, K, D)
         inducing_points_ = inducing_points.permute((-2,)+tuple(range(len(self._inducing_batch_shape)))+(-1,))
-        cov = self.model.covar_module.forward(nearest_neighbors_, nearest_neighbors_) # (kl_bs, *inducing_bs, K, K)
-        cross_cov = self.model.covar_module.forward(nearest_neighbors_, inducing_points_.unsqueeze(-2)) # (kl_bs, *inuding_bs, K, 1)
-        interp_term = torch.linalg.solve(
-            cov + self.jitter_val * torch.eye(self.k, device=self.inducing_points.device), cross_cov
-        ).squeeze(-1)  # (kl_bs, *inducing_bs, K)
+        # (kl_bs, *inducing_bs, D)
+        full_output = self.model.forward(torch.cat([nearest_neighbors_, inducing_points_.unsqueeze(-2)], dim=-2))
+        full_mean, full_covar = full_output.mean, full_output.covariance_matrix 
+        
+        # Mean terms
         _undo_permute_dims = tuple(range(1,1+len(self._inducing_batch_shape)))+(0,-1)
-        interp_term = interp_term.permute(_undo_permute_dims) #  K^{-1}_{n(j),n(j)} k_{n(j),j}, (*inducing_bs, kl_bs, K)
-        cross_cov = cross_cov.squeeze(-1).permute(_undo_permute_dims) # k_{n(j),j}, (*inducing_bs, kl_bs, K)
+        nearest_neighbors_prior_mean = full_mean[..., :self.k].permute(_undo_permute_dims) # (*inducing_bs, kl_bs, K)
+        inducing_prior_mean = full_mean[..., self.k:].permute(_undo_permute_dims).squeeze(-1) # (*inducing_bs, kl_bs) 
+        # Covar terms 
+        nearest_neighbors_prior_cov = full_covar[..., :self.k, :self.k] 
+        nearest_neighbors_inducing_prior_cross_cov = full_covar[..., :self.k, self.k:]
+        inducing_prior_cov = full_covar[..., self.k:, self.k:]
+        inducing_prior_cov = inducing_prior_cov.squeeze(-1).squeeze(-1).permute((-1,)+tuple(range(len(self._inducing_batch_shape))))
 
-        invquad_term_for_F = torch.sum(interp_term * cross_cov, dim=-1) # (*inducing_bs, kl_bs)
-        cov_inducing_points = self.model.covar_module.forward(
+        # Interpolation term K_nn^{-1} k_{nu}
+        interp_term = torch.linalg.solve(
+            nearest_neighbors_prior_cov + self.jitter_val * torch.eye(self.k, device=self.inducing_points.device), \
+                nearest_neighbors_inducing_prior_cross_cov
+        ).squeeze(-1)  # (kl_bs, *inducing_bs, K)
+        interp_term = interp_term.permute(_undo_permute_dims) # (*inducing_bs, kl_bs, K)
+        nearest_neighbors_inducing_prior_cross_cov \
+            = nearest_neighbors_inducing_prior_cross_cov.squeeze(-1).permute(_undo_permute_dims) # k_{n(j),j}, (*inducing_bs, kl_bs, K)
+
+        invquad_term_for_F = torch.sum(interp_term * nearest_neighbors_inducing_prior_cross_cov, dim=-1) # (*inducing_bs, kl_bs)
+        
+        inducing_prior_cov = self.model.covar_module.forward(
             inducing_points, inducing_points, diag=True
             ) # (*inducing_bs, kl_bs)        
-        F = cov_inducing_points - invquad_term_for_F
+        
+        F = inducing_prior_cov - invquad_term_for_F
         F = F + self.jitter_val
-        logdet_p = F.log().sum(dim=-1) # K_{n(j), n(j)} - k^\top_{n(j),j} K^{-1}_{n(j),n(j)} k_{n(j),j}, shape: inducing_bs
+        # K_uu - k_un K_nn^{-1} k_nu
+        logdet_p = F.log().sum(dim=-1)# shape: inducing_bs
 
-        ### compute trace_term
+        ### (3) compute trace_term
         expanded_variational_stddev = variational_stddev.unsqueeze(-1).expand(*self._batch_shape, self.M, self.k)
         expanded_variational_mean = variational_mean.unsqueeze(-1).expand(*self._batch_shape, self.M, self.k)
         expanded_nearest_neighbor_indices = nearest_neighbor_indices.expand(*self._batch_shape, kl_bs, self.k)
         nearest_neighbor_variational_covar = (
             expanded_variational_stddev.gather(-2, expanded_nearest_neighbor_indices) ** 2
         ) # (*batch_shape, kl_bs, k)
-        bjsquared_s = torch.sum(interp_term**2 * nearest_neighbor_variational_covar, dim=-1) # (*batch_shape, kl_bs)
-        inducing_point_covar = variational_stddev[..., kl_indices] ** 2 # (model_bs, kl_bs)
-        trace_term = (1.0 / F * (bjsquared_s + inducing_point_covar)).sum(dim=-1) # batch_shape
+        bjsquared_s_nearest_neighbors = torch.sum(interp_term**2 * nearest_neighbor_variational_covar, dim=-1) # (*batch_shape, kl_bs)
+        inducing_point_variational_covar = variational_stddev[..., kl_indices] ** 2 # (model_bs, kl_bs)
+        trace_term = (1.0 / F * (bjsquared_s_nearest_neighbors + inducing_point_variational_covar)).sum(dim=-1) # batch_shape
 
-        # compute invquad_term
-        nearest_neighbor_variational_mean = expanded_variational_mean.gather(-2, expanded_nearest_neighbor_indices)
-        Bj_m = torch.sum(interp_term * nearest_neighbor_variational_mean, dim=-1)
-        inducing_point_variational_mean = variational_mean[..., kl_indices]
-        invquad_term = torch.sum((inducing_point_variational_mean - Bj_m) ** 2 / F, dim=-1)
+        ### (4) compute invquad_term
+        nearest_neighbors_variational_mean = expanded_variational_mean.gather(-2, expanded_nearest_neighbor_indices)
+        Bj_m_nearest_neighbors = torch.sum(interp_term * (nearest_neighbors_variational_mean-nearest_neighbors_prior_mean), dim=-1)
+        inducing_variational_mean = variational_mean[..., kl_indices]
+        invquad_term = torch.sum((inducing_variational_mean - inducing_prior_mean - Bj_m_nearest_neighbors) ** 2 / F, dim=-1)
 
         kl = (logdet_p - logdet_q - kl_bs + trace_term + invquad_term) * (1.0 / 2)
         assert kl.shape == self._batch_shape, kl.shape
